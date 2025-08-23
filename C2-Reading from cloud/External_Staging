@@ -1,0 +1,122 @@
+/* In this example, the csv files are hosted in an external cloud provider. As a DE tasked with getting the data to perform downstream analytics,
+you've to read the data from the external cloud */
+
+use role ACCOUNTADMIN; -- Basically the superuser/ sudo user of a Snowflake account
+
+-- We'll create a storage integration for Snowflake to communicate with the external cloud and establish a communication --- 
+create storage integration BISTRO_INTEGRATION  --Enable SF to authenticate to Azure and read, write data to an external stage
+    type = external_stage
+    storage_provider = 'AZURE'
+    enabled = true
+    azure_tenant_id = "a8eec281-aaa3-4dae-ac9b-9a398b9215e7"
+    storage_allowed_locations = 
+        ('azure://rampant17.blob.core.windows.net/snowflake-practice/');  ---your storage container name and the folder the files are placed in
+
+describe storage integration BISTRO_INTEGRATION;
+
+grant usage on integration BISTRO_INTEGRATION to role SYSADMIN;
+
+use role SYSADMIN;
+create warehouse if not exists BAKERY_WH with warehouse_size = 'XSMALL';
+create database if not exists BAKERY_DB;
+use database BAKERY_DB;
+create schema EXTERNAL_ORDERS;
+use schema EXTERNAL_ORDERS;
+
+--- Creating an external stage using a Storage integration
+create stage BISTRO_STAGE
+    storage_integration = BISTRO_INTEGRATION
+    url = 'azure://rampant17.blob.core.windows.net/snowflake-practice/';
+--- This is the go-to method as Snowflake admin encapsulates the credentials and DE can directly use it
+
+list @BISTRO_STAGE;
+
+---drop stage BISTRO_SAS_STAGE;
+
+--- using sas token for external staging
+create stage BISTRO_SAS_STAGE
+    URL = 'azure://rampant17.blob.core.windows.net/snowflake-practice/'
+    CREDENTIALS = (AZURE_SAS_TOKEN = '?sv=2024-11-04&ss=b&srt=co&sp=rwdlaciytfx&se=2025-08-31T09:33:40Z&st=2025-08-22T01:18:40Z&spr=https&sig=AqG1x%2BmRlcziVLgEC5RyEqjXwh%2FWPJC3gtiIefFVN64%3D');
+--- This method to be used for quick test-drive and SAS tokens are temporary (like in expires after certain period)
+
+list @BISTRO_SAS_STAGE;
+
+use database BAKERY_DB;
+use schema EXTERNAL_ORDERS;
+create table ORDERS_BISTRO_STG (
+  customer varchar,
+  order_date date,
+  delivery_date date,
+  baked_good_type varchar,
+  quantity number,
+  source_file_name varchar,
+  load_ts timestamp
+);
+
+copy into ORDERS_BISTRO_STG
+from (
+  select $1, $2, $3, $4, $5, metadata$filename, current_timestamp() 
+  from @BISTRO_SAS_STAGE
+)
+file_format = (type = CSV, skip_header = 1)
+on_error = abort_statement;
+
+select * from ORDERS_BISTRO_STG;
+
+select *
+from information_schema.load_history
+where schema_name = 'EXTERNAL_ORDERS' and table_name = 'ORDERS_BISTRO_STG'
+order by last_load_time desc;
+
+create file format ORDERS_CSV_FORMAT
+  type = csv
+  field_delimiter = ','
+  skip_header = 1;
+
+copy into ORDERS_BISTRO_STG
+from (
+  select $1, $2, $3, $4, $5, metadata$filename, current_timestamp() 
+  from @BISTRO_SAS_STAGE
+)
+file_format = ORDERS_CSV_FORMAT     
+on_error = abort_statement;
+
+alter stage BISTRO_SAS_STAGE
+set directory = (enable = true);
+
+alter stage BISTRO_SAS_STAGE refresh;
+
+select * 
+from directory (@BISTRO_SAS_STAGE);
+
+
+
+copy into ORDERS_BISTRO_STG
+from (
+  select $1, $2, $3, $4, $5, metadata$filename, current_timestamp() 
+  from @BISTRO_SAS_STAGE/202308    
+)
+file_format = ORDERS_CSV_FORMAT
+on_error = abort_statement;
+
+list @BISTRO_SAS_STAGE;
+
+
+--- Create external table from an external stage
+--- This method can be used as an alternative way to using copy-into method, but usually slower.
+create external table ORDERS_BISTRO_EXT (
+  customer varchar as (VALUE:c1::varchar),
+  order_date date as (VALUE:c2::date),
+  delivery_date date as (VALUE:c3::date),
+  baked_good_type varchar as (VALUE:c4::varchar),
+  quantity number as (VALUE:c5::number),
+  source_file_name varchar as metadata$filename
+)
+location = @BISTRO_STAGE
+auto_refresh = FALSE
+file_format = ORDERS_CSV_FORMAT;
+
+create materialized view ORDERS_BISTRO_MV as
+select customer, order_date, delivery_date, 
+  baked_good_type, quantity, source_file_name
+from ORDERS_BISTRO_EXT;
