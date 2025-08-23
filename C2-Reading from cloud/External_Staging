@@ -12,7 +12,7 @@ create storage integration BISTRO_INTEGRATION  --Enable SF to authenticate to Az
     storage_allowed_locations = 
         ('azure://rampant17.blob.core.windows.net/snowflake-practice/');  ---your storage container name and the folder the files are placed in
 
-describe storage integration BISTRO_INTEGRATION;
+describe storage integration BISTRO_INTEGRATION; --this returns SF's svc principle used by cloud admin to approve; note azure_content_url and multi-tenant-name
 
 grant usage on integration BISTRO_INTEGRATION to role SYSADMIN;
 
