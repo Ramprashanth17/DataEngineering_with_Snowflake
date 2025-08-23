@@ -1,3 +1,7 @@
+--- Creating the required DB, schema and warehouse for our example
+/* Context: Our client is a bakery owner who wants to get a summary on the 
+goods and the quantity being sold. They'll post their data from mails manually to a csv file and they need DE 
+to create a pipeline to solve the problem */
 use role SYSADMIN;
 create database BAKERY_DB;
 create schema ORDERS;
@@ -10,8 +14,10 @@ create stage ORDERS_STAGE;
 
 list @ORDERS_STAGE;
 
+--- We'll use $ to read the col names as Orders_Stage is still a csv file in the staging area and has no defined schema
 select $1, $2, $3, $4, $5 from @ORDERS_STAGE;
 
+--- Some SF's built-in functions for getting summary based on metadata of the files
 select metadata$file_row_number from @ORDERS_STAGE;
 
 use database BAKERY_DB;
