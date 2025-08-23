@@ -8,7 +8,7 @@ create storage integration BISTRO_INTEGRATION  --Enable SF to authenticate to Az
     type = external_stage
     storage_provider = 'AZURE'
     enabled = true
-    azure_tenant_id = "a8eec281-aaa3-4dae-ac9b-9a398b9215e7"
+    azure_tenant_id = "a8eec281-aaa3-######-######"
     storage_allowed_locations = 
         ('azure://rampant17.blob.core.windows.net/snowflake-practice/');  ---your storage container name and the folder the files are placed in
 
@@ -26,7 +26,7 @@ use schema EXTERNAL_ORDERS;
 --- Creating an external stage using a Storage integration
 create stage BISTRO_STAGE
     storage_integration = BISTRO_INTEGRATION
-    url = 'azure://rampant17.blob.core.windows.net/snowflake-practice/';
+    url = 'azure://####.blob.core.windows.net/####/';
 --- This is the go-to method as Snowflake admin encapsulates the credentials and DE can directly use it
 
 list @BISTRO_STAGE;
@@ -35,7 +35,7 @@ list @BISTRO_STAGE;
 
 --- using sas token for external staging
 create stage BISTRO_SAS_STAGE
-    URL = 'azure://rampant17.blob.core.windows.net/snowflake-practice/'
+    URL = 'azure://###.blob.core.windows.net/#####/'
     CREDENTIALS = (AZURE_SAS_TOKEN = '?sv=2024-11-04&ss=b&srt=co&sp=rwdlaciytfx&se=2025-08-31T09:33:40Z&st=2025-08-22T01:18:40Z&spr=https&sig=AqG1x%2BmRlcziVLgEC5RyEqjXwh%2FWPJC3gtiIefFVN64%3D');
 --- This method to be used for quick test-drive and SAS tokens are temporary (like in expires after certain period)
 
