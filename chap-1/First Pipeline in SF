@@ -1,0 +1,169 @@
+use role SYSADMIN;
+create database BAKERY_DB;
+create schema ORDERS;
+create warehouse BAKERY_WH with warehouse_size = 'XSMALL';
+
+--- Creating the staging table
+use database BAKERY_DB;
+use schema ORDERS;
+create stage ORDERS_STAGE;
+
+list @ORDERS_STAGE;
+
+select $1, $2, $3, $4, $5 from @ORDERS_STAGE;
+
+select metadata$file_row_number from @ORDERS_STAGE;
+
+use database BAKERY_DB;
+use schema ORDERS;
+create table ORDERS_STG (
+  customer varchar,
+  order_date date,
+  delivery_date date,
+  baked_good_type varchar,
+  quantity number,
+  source_file_name varchar,
+  load_ts timestamp
+);
+
+
+---Copying data from the staging area to the table
+use database BAKERY_DB;
+use schema ORDERS;
+copy into ORDERS_STG
+from(
+select $1, $2, $3, $4, $5, metadata$filename, current_timestamp()
+from @ORDERS_STAGE
+)
+file_format = (type = CSV, skip_header=1)
+on_error = abort_statement
+purge = true;
+
+--- Querying the table
+SELECT * FROM ORDERS_STG;
+
+list @ORDERS_STAGE;
+
+--- Creating the target table CUSTOMERS_ORDERS
+use database BAKERY_DB;
+use schema ORDERS;
+create table CUSTOMER_ORDERS (
+  customer varchar,
+  order_date date,
+  delivery_date date,
+  baked_good_type varchar,
+  quantity number,
+  source_file_name varchar,
+  load_ts timestamp
+);
+
+
+-- To ensure data integrity and upsert the orders we'll use MERGE INTO keyword
+--the target table
+merge into CUSTOMER_ORDERS as tgt
+-- the source table
+using ORDERS_STG as src
+-- cols that ensure uniqueness PK
+on src.customer = tgt.customer
+and src.delivery_date = tgt.delivery_date
+and src.baked_good_type = tgt.baked_good_type
+-- Upsert accordingly when there's a match
+when matched then
+update set tgt.quantity = src.quantity,
+    tgt.source_file_name = src.source_file_name,
+    tgt.load_ts = current_timestamp()
+-- Insert the records if not matched
+when not matched then
+insert (customer, order_date, delivery_date, baked_good_type, quantity, source_file_name, load_ts)
+values (src.customer, src.order_date, src.delivery_date, src.baked_good_type, src.quantity, src.source_file_name, current_timestamp());  ---64 records, 1 file
+
+select * from CUSTOMER_ORDERS order by delivery_date desc;
+
+--- Creating a summary table SUMMARY_ORDERS to give a summary on the quantity and goods_ordered in a day
+use database BAKERY_DB;
+use schema ORDERS;
+create table SUMMARY_ORDERS(
+delivery_date DATE,
+baked_good_type varchar,
+total_quantity number
+);
+
+select delivery_date, baked_good_type, sum(quantity) as total_quantity 
+from customer_orders
+group by all;
+
+insert into SUMMARY_ORDERS(delivery_date, baked_good_type, total_quantity)
+  select delivery_date, baked_good_type, sum(quantity) as total_quantity
+  from CUSTOMER_ORDERS
+  group by all;
+
+
+  --- Creating a task, to automate the things that we've done before so that this task can be scheduled
+  use database BAKERY_DB;
+  use schema ORDERS;
+  create task PROCESS_ORDERS
+    warehouse = BAKERY_WH
+    schedule = '10 M'
+as
+begin
+--- Truncate table ORDERS_STG
+truncate table ORDERS_STG;
+--- Copying data into the staging table from the named internal staging files
+copy into ORDERS_STG
+from(
+select $1, $2, $3, $4, $5, metadata$filename, current_timestamp()
+from @ORDERS_STAGE
+)
+file_format = (type = CSV, skip_header=1)
+on_error = abort_statement
+purge = true;
+--- Upserting into the target table CUSTOMER_ORDERS
+merge into CUSTOMER_ORDERS as tgt
+-- the source table
+using ORDERS_STG as src
+-- cols that ensure uniqueness PK
+on src.customer = tgt.customer
+and src.delivery_date = tgt.delivery_date
+and src.baked_good_type = tgt.baked_good_type
+-- Upsert accordingly when there's a match
+when matched then
+update set tgt.quantity = src.quantity,
+    tgt.source_file_name = src.source_file_name,
+    tgt.load_ts = current_timestamp()
+-- Insert the records if not matched
+when not matched then
+insert (customer, order_date, delivery_date, baked_good_type, quantity, source_file_name, load_ts)
+values (src.customer, src.order_date, src.delivery_date, src.baked_good_type, src.quantity, src.source_file_name, current_timestamp());
+-- Truncate summary table for updated info
+truncate table SUMMARY_ORDERS;
+--- Insert the data into SUMMARY_ORDERS
+insert into SUMMARY_ORDERS(delivery_date, baked_good_type, total_quantity)
+  select delivery_date, baked_good_type, sum(quantity) as total_quantity
+  from CUSTOMER_ORDERS
+  group by all;
+end;
+
+-- To execute the above task we need to have execute access, although Snowflake allows all roles to create tasks, to execute it however we need execute access.
+use role ACCOUNTADMIN;
+grant execute task on account to role sysadmin;
+use role sysadmin;
+
+--- Executing the task
+execute task PROCESS_ORDERS;
+
+-- To verfiy the status of the task, do this:
+use schema INFORMATION_SCHEMA;
+select *
+  from table(information_schema.task_history())
+  order by scheduled_time desc;
+
+--- To alter the task
+alter task PROCESS_ORDERS resume; -- This enables the task to run on the defined schedule
+
+--- CRON Job to schedule the Process order task to run at 11 PM instead
+alter task PROCESS_ORDERS suspend;
+alter task PROCESS_ORDERS
+set schedule = 'USING CRON 0 23 * * * UTC'; --Syntax for CRON: ({minute} {hr in 24hr fmt} {* day_of_month} {* month} {* day_of_week} {Time zone})
+alter task PROCESS_ORDERS resume;
+
+alter task PROCESS_ORDERS suspend;
