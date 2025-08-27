@@ -1,0 +1,340 @@
+/* Context: This time, our fictional bakery partnered with a delivery company and the data from the delivery company will be in the JSON format and loaded into the cloud. As the DE, you need to read the data
+and store it in the SF database. Also, you are supposed to merge all the files coming from different sources and formats, regardless of whether it is in cloud or loaded directly. */
+
+--- Creating storage integration
+use role ACCOUNTADMIN;
+create storage integration JSON_INTEGRATION  
+    type = external_stage
+    storage_provider = 'AZURE'
+    enabled = true
+    azure_tenant_id = "a8eec281-aaa3-4dae-ac9b-########"
+    storage_allowed_locations = 
+        ('azure://r####3nt.blob.core.windows.net/chap4/json_folders/');
+
+describe storage integration JSON_INTEGRATION;
+
+grant usage on integration JSON_INTEGRATION to role SYSADMIN;
+
+use role SYSADMIN;
+use database BAKERY_DB;
+create schema EXTERNAL_JSON_ORDERS;
+use schema EXTERNAL_JSON_ORDERS;
+
+create stage JSON_SAS_STG
+    URL = 'azure://r######.blob.core.windows.net/chap4/json_folders/'
+    CREDENTIALS = (AZURE_SAS_TOKEN = '?sv=2024-11-04&ss=b&srt=co&sp=rwdlaciytfx&se=2025-08-31T09:33:40Z&st=2025-08-22T01:18:40Z&spr=https&sig=AqG1x%2BmRlcziVLgEC5RyEqjXwh%2FWPJ#####64%3D')
+file_format= (type=json);
+
+list @JSON_SAS_STG;
+
+--drop storage integration JSON_INTEGRATION; https://r#######.blob.core.windows.net/chap4/json_folders/
+drop stage JSON_SAS_STG;
+
+select $1 from @JSON_SAS_STG;
+
+use database BAKERY_DB;
+use schema EXTERNAL_JSON_ORDERS;
+create table ORDERS_JSON_RAW_STG (
+customer_orders VARIANT,
+source_file_name VARCHAR,
+load_ts TIMESTAMP
+);
+
+use role accountadmin;
+copy into ORDERS_JSON_RAW_STG
+from (
+SELECT $1,
+METADATA$FILENAME,
+current_timestamp
+from @JSON_SAS_STG
+)
+on_error = abort_statement;
+
+SELECT * from ORDERS_JSON_RAW_STG;
+
+select customer_orders:"Customer"::varchar as customer,
+customer_orders:"Order date"::date as order_date,
+customer_orders:"Orders"
+from ORDERS_JSON_RAW_STG;
+
+--- Error-handling in Snowflake: when converting the datatype if there's an issue snowflake has functions which allows you to convert
+-- the column into respective data type else it returns Null. Thus, it avoids pipeline failures.
+select customer_orders:"Customer"::varchar as customer,
+TRY_TO_DATE(customer_orders:"Order date"::varchar) as order_date,
+customer_orders:"Orders"
+from ORDERS_JSON_RAW_STG;
+
+--- To drill further into the ORDERS key-value pairs, we'll need to use LATERAL_FLATTEN function.
+--- In this ex: we're flattening ORDERS key and joining it with columns "customer" and "order_date"
+select customer_orders:"Customer"::varchar as customer, # :: --> it indicates casting.
+customer_orders:"Order date"::date as order_date,
+value:"Delivery date"::date as delivery_date,
+value:"Orders by day"
+from ORDERS_JSON_RAW_STG,
+lateral flatten (input => customer_orders:"Orders"); #Flatten: Unpacks the key-value pairs, and Lateral: It allows FLATTEN to have access to those key columns.
+
+--- since the above query returns ORDERS BY DAY a list of key-value pairs we need to use lateral flatten once more
+
+select count (*) FROM 
+(
+select customer_orders:"Customer"::varchar as customer,
+customer_orders:"Order date"::date as order_date,
+CO.value:"Delivery date"::date as delivery_date,
+DO.value:"Baked good type"::varchar as baked_good_type,
+DO.value: "Quantity"::number as quantity
+from orders_json_raw_stg,
+lateral flatten (input => customer_orders:"Orders") as CO,
+lateral flatten (input => CO.value:"Orders by day") as DO
+); 
+
+drop view orders_json_stg;
+--- Let's create a view, to get fast results
+CREATE OR REPLACE VIEW orders_json_stg as
+select customer_orders:"Customer"::varchar as customer,
+customer_orders:"Order date"::date as order_date,
+CO.value:"Delivery date"::date as delivery_date,
+DO.value:"Baked good type"::varchar as baked_good_type,
+DO.value: "Quantity"::number as quantity,
+source_file_name,
+load_ts
+from orders_json_raw_stg,
+lateral flatten (input => customer_orders:"Orders") as CO,
+lateral flatten (input => CO.value:"Orders by day") as DO;
+
+select count(*) from orders_json_stg;
+SELECT COUNT(*) FROM orders_json_raw_stg;
+
+SELECT GET_DDL('VIEW', 'orders_json_stg');
+
+--- To overcome 16MB data limit stored in a variant data type ask the data provider to create files so that each JSON doc contains an array of multiple objects
+---with the same structure. Use "STRIP_OUTER_ARRAY" in the COPY command.
+
+
+SELECT COUNT(*) FROM (
+    SELECT
+        customer_orders:"Customer"::varchar as customer,
+        customer_orders:"Order date"::date as order_date,
+        CO.value:"Delivery date"::date as delivery_date,
+        DO.value:"Baked good type"::varchar as baked_good_type,
+        DO.value:"Quantity"::number as quantity,
+        source_file_name,
+        load_ts
+    FROM orders_json_raw_stg,
+    LATERAL FLATTEN (input => customer_orders:"Orders") CO,
+    LATERAL FLATTEN (input => CO.value:"Orders by Day") DO
+);
+
+--- Encapsulating transformations with Stored Procedures.
+
+use database BAKERY_DB;
+create schema TRANSFORM;
+use schema TRANSFORM;
+
+---- Create a view to combine all the data from various stages (direct csv, csv files in cloud, json files in cloud)
+
+create or replace view ORDERS_COMBINED_STG as
+select customer, order_date, delivery_date, baked_good_type, quantity, source_file_name, load_ts
+from bakery_db.orders.orders_stg
+--union all to avoid duplication
+union
+select customer, order_date, delivery_date, baked_good_type, quantity, source_file_name, load_ts
+from bakery_db.external_orders.orders_bistro_stg
+union 
+select customer, order_date, delivery_date, baked_good_type, quantity, source_file_name, load_ts
+from bakery_db.external_json_orders.orders_json_stg;
+
+select count(*) from orders_combined_stg;
+
+--- Let's create a target table to load all the combined data
+use database BAKERY_DB;
+use schema TRANSFORM;
+create or replace table CUSTOMER_ORDERS_COMBINED (
+customer varchar,
+order_date date,
+delivery_date date,
+baked_good_type varchar,
+quantity number,
+source_file_name varchar,
+load_ts timestamp
+);
+
+
+---- Merging customer orders from the staging table to the target table ----------
+
+merge into CUSTOMER_ORDERS_COMBINED tgt 
+using ORDERS_COMBINED_STG src
+on src.customer = tgt.customer
+    and src.delivery_date = tgt.delivery_date
+    and src.baked_good_type = tgt.baked_good_type
+when matched then 
+    update set tgt.quantity = src.quantity,
+    tgt.source_file_name = src.source_file_name,
+    tgt.load_ts = current_timestamp()
+when not matched then
+    insert (customer, order_date, delivery_date, baked_good_type, quantity, source_file_name, load_ts)
+    values (src.customer, src.order_date, src.delivery_date, src.baked_good_type, src.quantity, src.source_file_name, current_timestamp());
+
+
+--- Creating a basic SP to encapsulate the merge statement so that it can be automated using Snowflake scripting
+use database bakery_db;
+use schema TRANSFORM;
+create or replace procedure LOAD_CUSTOMER_ORDERS()
+returns varchar
+language sql
+as
+$$
+begin
+    merge into CUSTOMER_ORDERS_COMBINED tgt 
+    using (
+        -- Deduplicate source data, keeping only one row per key combination
+        SELECT * FROM (
+            SELECT *,
+                ROW_NUMBER() OVER (
+                    PARTITION BY customer, delivery_date, baked_good_type 
+                    ORDER BY load_ts DESC  -- Keep the most recent record
+                ) as rn
+            FROM ORDERS_COMBINED_STG
+        ) WHERE rn = 1
+    ) src
+    ON src.customer = tgt.customer
+       AND src.delivery_date = tgt.delivery_date
+       AND src.baked_good_type = tgt.baked_good_type
+    when matched then 
+        update set tgt.quantity = src.quantity,
+        tgt.source_file_name = src.source_file_name,
+        tgt.load_ts = current_timestamp()
+    when not matched then
+        insert (customer, order_date, delivery_date, baked_good_type, quantity, source_file_name, load_ts)
+        values (src.customer, src.order_date, src.delivery_date, src.baked_good_type, src.quantity, src.source_file_name, current_timestamp());
+        return 'Load Completed.' || SQLROWCOUNT || 'rows affected.';
+        exception
+        when other then
+            return 'Load failed with error message: ' || SQLERRM;
+end;
+$$
+;
+
+
+-- Calling Stored procedure
+call LOAD_CUSTOMER_ORDERS();
+
+
+truncate table bakery_db.external_json_orders.orders_json_raw_stg;
+truncate table bakery_db.external_orders.orders_bistro_stg;
+truncate table bakery_db.orders.orders_stg;
+
+-- Check if duplicates still exist on your merge keys
+SELECT 
+    customer, 
+    delivery_date, 
+    baked_good_type,
+    COUNT(*) as count
+FROM ORDERS_COMBINED_STG
+GROUP BY customer, delivery_date, baked_good_type
+HAVING COUNT(*) > 1;
+
+
+--- Logging
+use role ACCOUNTADMIN;
+use schema TRANSFORM;
+create event table BAKERY_EVENTS; 
+
+use role ACCOUNTADMIN;
+alter account set event_table = BAKERY_DB.TRANSFORM.BAKERY_EVENTS;
+
+grant modify log level on account to role SYSADMIN;
+
+use role SYSADMIN;
+alter procedure LOAD_CUSTOMER_ORDERS() set log_level = DEBUG;
+
+use database BAKERY_DB;
+use role accountadmin;
+use schema TRANSFORM;
+create or replace procedure LOAD_CUSTOMER_ORDERS()
+returns varchar
+language sql
+as
+$$
+begin
+  SYSTEM$LOG_DEBUG('LOAD_CUSTOMER_ORDERS begin ');     
+  merge into CUSTOMER_ORDERS_COMBINED tgt  
+   using (
+        -- Deduplicate source data, keeping only one row per key combination
+        SELECT * FROM (
+            SELECT *,
+                ROW_NUMBER() OVER (
+                    PARTITION BY customer, delivery_date, baked_good_type 
+                    ORDER BY load_ts DESC  -- Keep the most recent record
+                ) as rn
+            FROM ORDERS_COMBINED_STG
+        ) WHERE rn = 1
+    ) src
+    ON src.customer = tgt.customer
+       AND src.delivery_date = tgt.delivery_date
+       AND src.baked_good_type = tgt.baked_good_type
+    when matched then 
+        update set tgt.quantity = src.quantity,
+        tgt.source_file_name = src.source_file_name,
+        tgt.load_ts = current_timestamp()
+    when not matched then
+        insert (customer, order_date, delivery_date, baked_good_type, quantity, source_file_name, load_ts)
+        values (src.customer, src.order_date, src.delivery_date, src.baked_good_type, src.quantity, src.source_file_name, current_timestamp());
+        return 'Load Completed.' || SQLROWCOUNT || 'rows affected.';
+        exception
+        when other then
+            return 'Load failed with error message: ' || SQLERRM;
+end;
+$$
+;
+call LOAD_CUSTOMER_ORDERS();
+
+select * 
+from BAKERY_EVENTS
+order by timestamp desc;
+
+use database BAKERY_DB;
+use schema TRANSFORM;
+create table SUMMARY_ORDERS (
+  delivery_date date,
+  baked_good_type varchar,
+  total_quantity number
+);
+
+truncate table SUMMARY_ORDERS;
+insert into SUMMARY_ORDERS(delivery_date, baked_good_type, total_quantity)
+  select delivery_date, baked_good_type, sum(quantity) as total_quantity
+  from CUSTOMER_ORDERS_COMBINED
+  group by all;
+
+use database bakery_db;
+use schema TRANSFORM;
+create or replace procedure LOAD_CUSTOMER_SUMMARY_ORDERS()
+returns varchar
+language sql
+as
+$$
+begin
+    SYSTEM$LOG_DEBUG('LOAD_CUSTOMER_SUMMARY_ORDERS begin');
+    
+truncate table SUMMARY_ORDERS;
+insert into SUMMARY_ORDERS(delivery_date, baked_good_type, total_quantity)
+  select delivery_date, baked_good_type, sum(quantity) as total_quantity
+  from CUSTOMER_ORDERS_COMBINED
+  group by all;
+return 'Load completed' || SQLROWCOUNT || 'rows inserted';
+exception
+when other then
+    return 'Load failed with error message: '|| SQLERRM;
+end;
+$$
+;
+
+call LOAD_CUSTOMER_SUMMARY_ORDERS();
+
+select * 
+from SUMMARY_ORDERS 
+order by delivery_date desc;
+
+    
+
+
