@@ -4,8 +4,8 @@ create or replace storage integration pacific_retail_project        ---Allows SF
     type = external_stage
     storage_provider = 'azure'
     enabled = true
-    azure_tenant_id = "a8eec281-aaa3-4dae-ac9b-9a398b9215e7"
-    storage_allowed_locations = ('azure://rampant17.blob.core.windows.net/snowflake-practice/')
+    azure_tenant_id = "a8eec281-aaa3-4dae-ac9b-9a39########"
+    storage_allowed_locations = ('azure://ram###.blob.core.windows.net/#######/')
 
 desc storage integration pacific_retail_project;    --- use azure_consent_url for authenticating SF; multi_tenant_app_name ---> to give permissions for SF to modify data.
 
