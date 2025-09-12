@@ -1,0 +1,150 @@
+use role SYSADMIN;
+use database BAKERY_DB;
+create schema EXT with managed access;
+create schema STG with managed access;
+create schema DWH with managed access;
+create schema MGMT with managed access;
+
+---- Security admin grants full access to the schemas to bakery_full thereby (DEng full access)--------
+use role SECURITYADMIN;
+grant all on schema BAKERY_DB.EXT to role BAKERY_FULL;
+grant all on schema BAKERY_DB.STG to role BAKERY_FULL;
+grant all on schema BAKERY_DB.DWH to role BAKERY_FULL;
+grant all on schema BAKERY_DB.MGMT to role BAKERY_FULL;
+
+---- Giving read-only access to mgmt schema and to bakery_read role thereby to DA role ---
+grant select on all tables in schema BAKERY_DB.MGMT to role BAKERY_READ;
+grant select on all views in schema BAKERY_DB.MGMT to role BAKERY_READ;
+
+grant select on future tables in schema BAKERY_DB.MGMT to role BAKERY_READ;
+grant select on future views in schema BAKERY_DB.MGMT to role BAKERY_READ;
+
+
+/* Creating ELT Datapipeline for our Bakery. Here is the context: Ingestion from 2 sources: Order info from customers stored as JSON files in cloud; Details about bakery's biz partners and baked goods that reside in bakery's operational IT system DB. We're assuming that this data is extracted using a integration tool and the tables created in the staging layer of the pipeline */
+
+/* Extraction layer --> staging layer ---> DWH layer ---> Reporting layer */
+
+---- Building the extraction layer -------
+--- creating staging layer using SAS token ---
+use role accountadmin;
+use database bakery_db;
+use schema EXT;
+create stage JSON_ORDERS_STAGE
+    url = 'azure://rampant17.blob.core.windows.net/chap4/Proj_C11/'
+    CREDENTIALS = (AZURE_SAS_TOKEN = '?sv=2024-11-04&ss=b&srt=co&sp=rwdlaciytfx&se=2025-08-31T09:33:40Z&st=2025-08-22T01:18:40Z&spr=https&sig=AqG1x%2BmRlcziVLgEC5RyEqjXwh%2FWPJC3gtiIefFVN64%3D') --good till 31st Aug
+    file_format= (type=json);
+
+--- Storage integration to connect SF to the cloud ----
+create storage integration PARK_INN_INTEGRATION
+    type = external_stage
+    storage_provider = 'AZURE'
+    enabled = true
+    azure_tenant_id = "a8eec281-aaa3-4dae-ac9b-9a398b9215e7"
+    storage_allowed_locations = ('azure://rampant17.blob.core.windows.net/chap4/Proj_C11/')
+    
+--- Grant the PARK_INN_Integration to Data Engineer ----
+grant usage on integration PARK_INN_INTEGRATION to role data_engineer;
+
+use role DATA_ENGINEER;
+use warehouse BAKERY_WH;
+use database BAKERY_DB;
+use schema EXT;
+
+list @JSON_ORDERS_STAGE;
+
+--- DDL to create staging table ----
+create table JSON_ORDERS_EXT (
+customer_orders variant,
+source_file_name varchar,
+load_ts timestamp
+);
+
+--- copy the data from staging files to staging table ---
+copy into JSON_ORDERS_EXT
+from (
+    select
+    $1,
+    metadata$filename,
+    current_timestamp()
+    from @JSON_ORDERS_STAGE
+)
+on_error = abort_statement;
+
+select * from json_orders_ext;
+
+---- Staging layer stores transformed data from both JSON and tables -----
+use database bakery_db;
+use schema ext;
+
+create view json_orders_stg as 
+select
+E.customer_orders:"Customer"::varchar as customer,
+E.customer_orders:"Order date"::date as order_date,
+CO.value:"Delivery date":: date as delivery_date,
+DO.value:"Baked good type"::varchar as baked_good_type,
+DO.value: "Quantity"::number as quantity,
+source_file_name,
+load_ts
+from EXT.JSON_ORDERS_EXT as E,
+lateral flatten (input => customer_orders:"Orders") as CO,
+lateral flatten (input => CO.value:"Orders by day") as DO;
+
+select * from json_orders_stg;
+
+----- Src-2: Transactional Data about Partners & Products in Table format created from data integration tool ---------
+
+use role DATA_ENGINEER;
+use warehouse BAKERY_WH;
+use database BAKERY_DB;
+use schema STG;
+
+-- create tables in the STG schema, simulating tables populated from the source system using a data integration tool or custom solution
+create table PARTNER (
+partner_id integer,
+partner_name varchar,
+address varchar,
+rating varchar,
+valid_from date
+);
+
+insert into PARTNER values
+(101, 'Coffee Pocket', '501 Courtney Wells', 'A', '2023-06-01'),
+(102, 'Lily''s Coffee', '2825 Joshua Forest', 'A', '2023-06-01'),
+(103, 'Crave Coffee', '538 Hayden Port', 'B', '2023-06-01'),
+(104, 'Best Burgers', '790 Friedman Valley', 'A', '2023-06-01'),
+(105, 'Page One Fast Food', '44864 Amber Walk', 'B', '2023-06-01'),
+(106, 'Jimmy''s Diner', '2613 Scott Mountains', 'A', '2023-06-01'),
+(107, 'Metro Fine Foods', '520 Castillo Valley', 'A', '2023-06-01'),
+(108, 'New Bistro', '494 Terry Spurs', 'A', '2023-06-01'),
+(109, 'Park Inn', '3692 Nelson Turnpike', 'A', '2023-06-01'),
+(110, 'Chef Supplies', '870 Anthony Hill', 'A', '2023-06-01'),
+(111, 'Farm Fresh', '23633 Melanie Ranch', 'A', '2023-06-01'),
+(112, 'Murphy Mill', '700 Darren Centers', 'A', '2023-06-01');
+
+select * from PARTNER;
+
+create table PRODUCT (
+product_id integer,
+product_name varchar,
+category varchar,
+min_quantity integer,
+price number(18,2),
+valid_from date
+);
+
+insert into PRODUCT values
+(1, 'Baguette', 'Bread', 2, 2.5, '2023-06-01'),
+(2, 'Bagel', 'Bread', 6, 1.3, '2023-06-01'), 
+(3, 'English Muffin', 'Bread', 6, 1.2, '2023-06-01'), 
+(4, 'Croissant', 'Pastry', 4, 2.1, '2023-06-01'), 
+(5, 'White Loaf', 'Bread', 1, 1.8, '2023-06-01'), 
+(6, 'Hamburger Bun', 'Bread', 10, 0.9, '2023-06-01'), 
+(7, 'Rye Loaf', 'Bread', 1, 3.2, '2023-06-01'), 
+(8, 'Whole Wheat Loaf', 'Bread', 1, 2.8, '2023-06-01'), 
+(9, 'Muffin', 'Pastry', 12, 3.0, '2023-06-01'), 
+(10, 'Cinnamon Bun', 'Pastry', 6, 3.4, '2023-06-01'), 
+(11, 'Blueberry Muffin', 'Pastry', 12, 3.6, '2023-06-01'), 
+(12, 'Chocolate Muffin', 'Pastry', 12, 3.6, '2023-06-01'); 
+
+select * from PRODUCT;
+
