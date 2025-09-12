@@ -1,0 +1,84 @@
+use role DATA_ENGINEER;
+use warehouse BAKERY_WH;
+use database BAKERY_DB;
+use schema EXT;
+
+truncate table json_orders_ext;
+
+---- Creating a stream to capture any changes happened in data -------
+
+create stream JSON_ORDERS_STREAM
+on table JSON_ORDERS_EXT;
+
+select * from JSON_ORDERS_STREAM;
+
+list @JSON_ORDERS_STAGE;
+
+copy into bakery_db.ext.json_orders_ext
+from (
+  select 
+    $1, 
+    metadata$filename, 
+    current_timestamp() 
+  from @JSON_ORDERS_STAGE
+)
+on_error = abort_statement;
+
+use schema stg;
+create table STG.JSON_ORDERS_TBL_STG (
+  customer varchar,
+  order_date date,
+  delivery_date date,
+  baked_good_type varchar,
+  quantity number,
+  source_file_name varchar,
+  load_ts timestamp
+);
+
+insert into STG.JSON_ORDERS_TBL_STG
+select 
+  customer_orders:"Customer"::varchar as customer, 
+  customer_orders:"Order date"::date as order_date, 
+  CO.value:"Delivery date"::date as delivery_date,
+  DO.value:"Baked good type":: varchar as baked_good_type,
+  DO.value:"Quantity"::number as quantity,
+  source_file_name,
+  load_ts
+from EXT.JSON_ORDERS_STREAM,
+lateral flatten (input => customer_orders:"Orders") CO,
+lateral flatten (input => CO.value:"Orders by day") DO;
+
+select * from STG.JSON_ORDERS_TBL_STG;
+
+copy into JSON_ORDERS_EXT
+from (
+  select 
+    $1, 
+    metadata$filename, 
+    current_timestamp() 
+  from @JSON_ORDERS_STAGE
+)
+on_error = abort_statement;
+
+use role DATA_ENGINEER;
+use warehouse BAKERY_WH;
+use database BAKERY_DB;
+use schema DWH;
+
+create table PRODUCT_TBL as 
+select * from STG.PRODUCT;
+
+select * from PRODUCT_TBL;
+
+use schema STG;
+create stream PRODUCT_STREAM on table PRODUCT;
+
+update PRODUCT
+  set category = 'Pastry', valid_from = '2023-08-08'
+  where product_id = 3;
+
+insert into PRODUCT values
+  (13, 'Sourdough Bread', 'Bread', 1, 3.6, '2023-08-08');
+
+  select * from PRODUCT_STREAM;
+
